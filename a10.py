@@ -1,203 +1,215 @@
-import re, string, calendar
+import re, string
 from wikipedia import WikipediaPage
 import wikipedia
 from bs4 import BeautifulSoup
-from nltk import word_tokenize, pos_tag, ne_chunk
-from nltk.tree import Tree
 from match import match
 from typing import List, Callable, Tuple, Any, Match
 
+# ------------- Fetch and parse Lamborghini data from Wikipedia ------------------
 
 def get_page_html(title: str) -> str:
-    """Gets html of a wikipedia page
-
-    Args:
-        title - title of the page
-
-    Returns:
-        html of the page
-    """
     results = wikipedia.search(title)
+    if not results:
+        raise LookupError(f"No Wikipedia page found for {title}")
     return WikipediaPage(results[0]).html()
 
-
 def get_first_infobox_text(html: str) -> str:
-    """Gets first infobox html from a Wikipedia page (summary box)
-
-    Args:
-        html - the full html of the page
-
-    Returns:
-        html of just the first infobox
-    """
     soup = BeautifulSoup(html, "html.parser")
     results = soup.find_all(class_="infobox")
-
     if not results:
         raise LookupError("Page has no infobox")
     return results[0].text
 
-
 def clean_text(text: str) -> str:
-    """Cleans given text removing non-ASCII characters and duplicate spaces & newlines
-
-    Args:
-        text - text to clean
-
-    Returns:
-        cleaned text
-    """
     only_ascii = "".join([char if char in string.printable else " " for char in text])
     no_dup_spaces = re.sub(" +", " ", only_ascii)
     no_dup_newlines = re.sub("\n+", "\n", no_dup_spaces)
-    return no_dup_newlines
+    return no_dup_newlines.strip()
 
-
-def get_match(
-    text: str,
-    pattern: str,
-    error_text: str = "Page doesn't appear to have the property you're expecting",
-) -> Match:
-    """Finds regex matches for a pattern
-
-    Args:
-        text - text to search within
-        pattern - pattern to attempt to find within text
-        error_text - text to display if pattern fails to match
-
-    Returns:
-        text that matches
-    """
+def get_match(text: str, pattern: str, error_text: str = "Property not found") -> Match:
     p = re.compile(pattern, re.DOTALL | re.IGNORECASE)
-    match = p.search(text)
-
-    if not match:
+    match_obj = p.search(text)
+    if not match_obj:
         raise AttributeError(error_text)
-    return match
+    return match_obj
 
+# Fetch and parse Lamborghini automobiles list page once, store info here
+print("Fetching Lamborghini model data from Wikipedia, please wait...")
+html = get_page_html("List of Lamborghini automobiles")
+soup = BeautifulSoup(html, "html.parser")
 
-def get_polar_radius(planet_name: str) -> str:
-    """Gets the radius of the given planet
+# The data is in tables — we'll parse the "Former production vehicles" table and others
+# We'll extract Model, Production Duration, Engine, Top Speed for each model listed
 
-    Args:
-        planet_name - name of the planet to get radius of
+def parse_lambo_tables(soup):
+    model_data = {}
+    # The tables of interest have class "wikitable"
+    tables = soup.find_all("table", {"class": "wikitable"})
+    # We'll parse each table row (skip header)
+    for table in tables:
+        rows = table.find_all("tr")
+        headers = [th.get_text(strip=True).lower() for th in rows[0].find_all("th")]
+        # We want columns like model, duration of production, engine, top speed
+        # Find indexes for those columns (some tables have slightly different headers)
+        try:
+            model_idx = headers.index("model")
+            duration_idx = headers.index("duration of production")
+            engine_idx = headers.index("engine")
+            top_speed_idx = headers.index("top speed")
+        except ValueError:
+            continue  # skip tables that don't have these headers
+        
+        for row in rows[1:]:
+            cols = row.find_all(["td","th"])
+            if len(cols) < max(model_idx, duration_idx, engine_idx, top_speed_idx) + 1:
+                continue
+            # Extract text for each column
+            model_raw = cols[model_idx].get_text(separator=" ", strip=True)
+            duration = cols[duration_idx].get_text(separator=" ", strip=True)
+            engine = cols[engine_idx].get_text(separator=" ", strip=True)
+            top_speed = cols[top_speed_idx].get_text(separator=" ", strip=True)
 
-    Returns:
-        radius of the given planet
-    """
-    infobox_text = clean_text(get_first_infobox_text(get_page_html(planet_name)))
-    pattern = r"(?:Polar radius.*?)(?: ?[\d]+ )?(?P<radius>[\d,.]+)(?:.*?)km"
-    error_text = "Page infobox has no polar radius information"
-    match = get_match(infobox_text, pattern, error_text)
+            # Models can be comma separated or have multiple variants in the cell
+            models = [m.strip() for m in re.split(r",|/", model_raw)]
+            for m in models:
+                key = m.lower()
+                model_data[key] = {
+                    "model": m,
+                    "duration": duration,
+                    "engine": engine,
+                    "top_speed": top_speed
+                }
+    return model_data
 
-    return match.group("radius")
+model_info = parse_lambo_tables(soup)
 
+if not model_info:
+    print("Warning: No Lamborghini model data found!")
 
-def get_birth_date(name: str) -> str:
-    """Gets birth date of the given person
+# Print some models to help user get started
+sample_models = list(model_info.keys())[:3]
+print("Data loaded successfully.")
+print("Some Lamborghini models you can ask about:", ", ".join([model_info[m]["model"] for m in sample_models]))
 
-    Args:
-        name - name of the person
+# ----------------- Helper functions to retrieve info --------------------
 
-    Returns:
-        birth date of the given person
-    """
-    infobox_text = clean_text(get_first_infobox_text(get_page_html(name)))
-    pattern = r"(?:Born\D*)(?P<birth>\d{4}-\d{2}-\d{2})"
-    error_text = (
-        "Page infobox has no birth information (at least none in xxxx-xx-xx format)"
-    )
-    match = get_match(infobox_text, pattern, error_text)
+def get_duration(model_name: str) -> str:
+    key = model_name.lower()
+    if key in model_info:
+        return model_info[key]["duration"]
+    else:
+        raise AttributeError(f"No production duration info for model '{model_name}'")
 
-    return match.group("birth")
+def get_engine(model_name: str) -> str:
+    key = model_name.lower()
+    if key in model_info:
+        return model_info[key]["engine"]
+    else:
+        raise AttributeError(f"No engine info for model '{model_name}'")
 
+def get_top_speed(model_name: str) -> str:
+    key = model_name.lower()
+    if key in model_info:
+        return model_info[key]["top_speed"]
+    else:
+        raise AttributeError(f"No top speed info for model '{model_name}'")
 
-# below are a set of actions. Each takes a list argument and returns a list of answers
-# according to the action and the argument. It is important that each function returns a
-# list of the answer(s) and not just the answer itself.
+# ----------------- Action functions --------------------
 
+def duration_action(matches: List[str]) -> List[str]:
+    model = " ".join(matches)
+    try:
+        duration = get_duration(model)
+        return [f"The production duration of {model.title()} is: {duration}"]
+    except AttributeError as e:
+        return [str(e)]
 
-def birth_date(matches: List[str]) -> List[str]:
-    """Returns birth date of named person in matches
+def engine_action(matches: List[str]) -> List[str]:
+    model = " ".join(matches)
+    try:
+        engine = get_engine(model)
+        return [f"The engine type of {model.title()} is: {engine}"]
+    except AttributeError as e:
+        return [str(e)]
 
-    Args:
-        matches - match from pattern of person's name to find birth date of
+def top_speed_action(matches: List[str]) -> List[str]:
+    model = " ".join(matches)
+    try:
+        top_speed = get_top_speed(model)
+        return [f"The top speed of {model.title()} is: {top_speed}"]
+    except AttributeError as e:
+        return [str(e)]
 
-    Returns:
-        birth date of named person
-    """
-    return [get_birth_date(" ".join(matches))]
+def model_help_action(matches: List[str]) -> List[str]:
+    model = " ".join(matches)
+    # Just give user a nudge on what they can ask about this model
+    key = model.lower()
+    if key in model_info:
+        return [f"Ask me about the production duration, engine type, or top speed of {model.title()}."]
+    else:
+        return [f"No information found for model '{model.title()}'. Try another Lamborghini model."]
 
-
-def polar_radius(matches: List[str]) -> List[str]:
-    """Returns polar radius of planet in matches
-
-    Args:
-        matches - match from pattern of planet to find polar radius of
-
-    Returns:
-        polar radius of planet
-    """
-    return [get_polar_radius(matches[0])]
-
-
-# dummy argument is ignored and doesn't matter
 def bye_action(dummy: List[str]) -> None:
     raise KeyboardInterrupt
 
+# ---------------- Patterns and Actions ----------------
 
-# type aliases to make pa_list type more readable, could also have written:
-# pa_list: List[Tuple[List[str], Callable[[List[str]], List[Any]]]] = [...]
 Pattern = List[str]
 Action = Callable[[List[str]], List[Any]]
 
-# The pattern-action list for the natural language query system. It must be declared
-# here, after all of the function definitions
 pa_list: List[Tuple[Pattern, Action]] = [
-    ("when was % born".split(), birth_date),
-    ("what is the polar radius of %".split(), polar_radius),
+    # Production duration questions
+    ("what is the production duration of %".split(), duration_action),
+    ("how long was % produced".split(), duration_action),
+    ("when was % produced".split(), duration_action),
+    ("production duration of %".split(), duration_action),
+
+    # Engine type questions
+    ("what is the engine type of %".split(), engine_action),
+    ("tell me the engine of %".split(), engine_action),
+    ("engine type of %".split(), engine_action),
+    ("engine of %".split(), engine_action),
+
+    # Top speed questions
+    ("what is the top speed of %".split(), top_speed_action),
+    ("tell me the top speed of %".split(), top_speed_action),
+    ("top speed of %".split(), top_speed_action),
+
+    # Simple queries with just the model name or model+keyword
+    (["%"], model_help_action),
+    (["%", "production"], duration_action),
+    (["%", "engine"], engine_action),
+    (["%", "top", "speed"], top_speed_action),
+
+    # Bye
     (["bye"], bye_action),
 ]
 
+# ------------------ Main matching and input loop ------------------------
 
 def search_pa_list(src: List[str]) -> List[str]:
-    """Takes source, finds matching pattern and calls corresponding action. If it finds
-    a match but has no answers it returns ["No answers"]. If it finds no match it
-    returns ["I don't understand"].
-
-    Args:
-        source - a phrase represented as a list of words (strings)
-
-    Returns:
-        a list of answers. Will be ["I don't understand"] if it finds no matches and
-        ["No answers"] if it finds a match but no answers
-    """
     for pat, act in pa_list:
         mat = match(pat, src)
         if mat is not None:
-            answer = act(mat)
-            return answer if answer else ["No answers"]
-
-    return ["I don't understand"]
-
+            return act(mat)
+    return ["I don't understand. Try asking about production duration, engine type, or top speed of a Lamborghini model."]
 
 def query_loop() -> None:
-    """The simple query loop. The try/except structure is to catch Ctrl-C or Ctrl-D
-    characters and exit gracefully"""
-    print("Welcome to the movie database!\n")
+    print("\nWelcome to the Lamborghini info chatbot!\n")
+    print("Ask about production duration, engine type, or top speed of a Lamborghini model.")
+    print("Type 'bye' to exit.\n")
     while True:
         try:
-            print()
             query = input("Your query? ").replace("?", "").lower().split()
+            if not query:
+                print("Please enter a question or model name.")
+                continue
             answers = search_pa_list(query)
             for ans in answers:
                 print(ans)
-
         except (KeyboardInterrupt, EOFError):
+            print("\nGoodbye!")
             break
 
-    print("\nSo long!\n")
-
-
-# uncomment the next line once you've implemented everything are ready to try it out
-query_loop()
+if __name__ == "__main__":
+    query_loop()
